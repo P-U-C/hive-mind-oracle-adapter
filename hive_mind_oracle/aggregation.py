@@ -24,7 +24,7 @@ def aggregate_oracle_snapshots(
         w_i = (oracle_stake_pft * oracle_quality_score) / (ci_width^2 + 0.01)
 
     Aggregation:
-        Weighted median (sort by karma_score, find cumulative-weight midpoint)
+        Weighted median (sort by raw_karma, find cumulative-weight midpoint)
 
     Post-processing:
         - If fewer than 3 eligible snapshots: apply 50% confidence haircut
@@ -34,11 +34,7 @@ def aggregate_oracle_snapshots(
         (consensus_karma: float, high_divergence: bool)
     """
     eligible = [s for s in snapshots if s.oracle_quality_score >= MIN_QUALITY_SCORE]
-    # Haircut applies when total unique oracle coverage is < 3.
-    # Each snapshot's oracle_count field reports how many oracles contributed
-    # to that snapshot's score; use the max across eligible snapshots.
-    total_oracle_coverage = max((s.oracle_count for s in eligible), default=0)
-    haircut_applied = total_oracle_coverage < 3
+    haircut_applied = len(eligible) < 3
 
     if not eligible:
         return 0.0, False
@@ -48,7 +44,7 @@ def aggregate_oracle_snapshots(
     for snap in eligible:
         ci_width = snap.confidence_interval.width
         w = (snap.oracle_stake_pft * snap.oracle_quality_score) / (ci_width ** 2 + 0.01)
-        weighted.append((snap.karma_score, w))
+        weighted.append((snap.raw_karma, w))
 
     # Weighted median
     weighted.sort(key=lambda x: x[0])
@@ -66,7 +62,7 @@ def aggregate_oracle_snapshots(
         consensus *= CONFIDENCE_HAIRCUT
 
     # IQR divergence check (using raw scores of eligible snapshots)
-    scores = [s.karma_score for s in eligible]
+    scores = [s.raw_karma for s in eligible]
     high_divergence = False
     if len(scores) >= 4:
         scores_sorted = sorted(scores)

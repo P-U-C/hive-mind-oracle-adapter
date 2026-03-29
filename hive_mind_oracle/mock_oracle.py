@@ -37,12 +37,11 @@ class MockOracleClient:
             domain=domain,
             timestamp=time.time(),
             nonce=self._next_nonce(oracle_id),
-            karma_score=0.85,
+            raw_karma=0.85,
             confidence_interval=ConfidenceInterval(lower=0.80, upper=0.90),
             oracle_quality_score=0.92,
             oracle_stake_pft=5000.0,
             effective_sample_size=180,
-            oracle_count=3,
             oracle_state=OracleState.verified,
         )
 
@@ -58,12 +57,11 @@ class MockOracleClient:
             domain=domain,
             timestamp=time.time() - 7200,  # 2 hours stale
             nonce=self._next_nonce(oracle_id),
-            karma_score=0.55,
+            raw_karma=0.55,
             confidence_interval=ConfidenceInterval(lower=0.30, upper=0.80),
             oracle_quality_score=0.4,  # below MIN_QUALITY_SCORE=0.7
             oracle_stake_pft=100.0,
             effective_sample_size=10,
-            oracle_count=1,
             oracle_state=OracleState.degraded,
         )
 
@@ -78,12 +76,11 @@ class MockOracleClient:
             domain=domain,
             timestamp=time.time(),
             nonce=self._next_nonce(oracle_id),
-            karma_score=0.20,
+            raw_karma=0.20,
             confidence_interval=ConfidenceInterval(lower=0.0, upper=0.5),
             oracle_quality_score=0.75,
             oracle_stake_pft=50.0,
             effective_sample_size=0,
-            oracle_count=1,
             oracle_state=OracleState.unverified,
         )
 
@@ -95,6 +92,7 @@ class MockOracleClient:
         outperformed: bool = True,
     ) -> AttributionOutcomeV1:
         """Generate a realistic attribution outcome for a trade."""
+        oracle_id = f"oracle-{operator_id}-primary"
         if outperformed:
             baseline_brier = 0.25
             realized_brier = 0.10  # beat the baseline
@@ -104,7 +102,7 @@ class MockOracleClient:
 
         return AttributionOutcomeV1(
             schema_version="spi.oracle.v1",
-            idempotency_key=f"{trade_id}-{operator_id}",
+            idempotency_key=f"{oracle_id}:attribution.outcome:{trade_id}",
             operator_id=operator_id,
             domain=domain,
             trade_id=trade_id,

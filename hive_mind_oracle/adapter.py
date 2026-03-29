@@ -4,6 +4,7 @@ adapter.py — HiveMindOracleAdapter: ingests oracle evidence and produces routi
 from __future__ import annotations
 
 import math
+import sys
 import time
 from typing import Optional
 
@@ -37,12 +38,6 @@ class HiveMindOracleAdapter:
     """
 
     def __init__(self, time_offset: float = 0.0) -> None:
-        """
-        Args:
-            time_offset: added to time.time() for timestamp validation in tests.
-                         Set to a negative value to simulate the past, or adjust
-                         snapshots to use a timestamp relative to (time.time() + offset).
-        """
         self._time_offset = time_offset
         self._ledger: dict[tuple[str, str], LedgerEntry] = {}
         self._snapshots: dict[tuple[str, str], list[OracleScoreSnapshotV1]] = {}
@@ -57,6 +52,21 @@ class HiveMindOracleAdapter:
 
     def _now(self) -> float:
         return time.time() + self._time_offset
+
+    def _verify_signature(self, msg_type: str, payload: dict, signature: str, oracle_id: str) -> bool:
+        """
+        Stub: secp256k1 signature verification.
+
+        Production implementation must:
+        1. Fetch oracle's registered public key from Oracle Registry
+        2. Compute canonical payload hash (SHA-256 of sorted JSON fields)
+        3. Verify secp256k1 signature against hash
+        4. Reject message if signature invalid or oracle key not registered
+
+        Current implementation: STUB — logs warning, always returns True.
+        """
+        print(f"[WARN] Signature verification not implemented for {msg_type} from {oracle_id}", file=sys.stderr)
+        return True
 
     def _validate_snapshot(self, msg: OracleScoreSnapshotV1) -> None:
         if not msg.oracle_id:
@@ -82,6 +92,8 @@ class HiveMindOracleAdapter:
             raise ValueError(
                 f"Snapshot timestamp too far from now: age={age:.1f}s (max 60s)"
             )
+        # Signature verification stub
+        self._verify_signature("ORACLE_SCORE_SNAPSHOT_V1", {}, msg.signature, msg.oracle_id)
 
     # ------------------------------------------------------------------
     # Public API
@@ -111,8 +123,7 @@ class HiveMindOracleAdapter:
         )
 
         eligible_snaps = [s for s in self._snapshots[key] if s.oracle_quality_score >= 0.7]
-        total_oracle_coverage = max((s.oracle_count for s in eligible_snaps), default=0)
-        haircut_applied = total_oracle_coverage < 3
+        haircut_applied = len(eligible_snaps) < 3
 
         now = self._now()
         entry = LedgerEntry(
@@ -121,7 +132,7 @@ class HiveMindOracleAdapter:
             oracle_id=msg.oracle_id,
             karma=consensus_karma,
             effective_sample_size=msg.effective_sample_size,
-            oracle_count=msg.oracle_count,
+            oracle_count=len(eligible_snaps),
             timestamp=now,
             snapshot_timestamp=msg.timestamp,
             nonce=msg.nonce,
@@ -135,19 +146,13 @@ class HiveMindOracleAdapter:
 
         self._ledger[key] = entry
 
-        # Update operator karma
-        if msg.operator_id not in self._operator_karma:
-            self._operator_karma[msg.operator_id] = consensus_karma
-        else:
-            # EMA blend: 80% existing, 20% new
-            self._operator_karma[msg.operator_id] = (
-                0.8 * self._operator_karma[msg.operator_id] + 0.2 * consensus_karma
-            )
+        # Direct assignment — CI-weighted consensus IS the karma
+        self._operator_karma[msg.operator_id] = consensus_karma
 
         # Track peak
         self._peak_karma[msg.operator_id] = max(
             self._peak_karma.get(msg.operator_id, 0.0),
-            self._operator_karma[msg.operator_id],
+            consensus_karma,
         )
 
         return entry
@@ -172,10 +177,13 @@ class HiveMindOracleAdapter:
 
         self._processed_keys.add(msg.idempotency_key)
 
+        # Enforce spec: signal_weight = 0 if confidence < 0.30
+        effective_signal_weight = msg.signal_weight if msg.signal_weight >= 0.30 else 0.0
+
         # karma_delta = recency_weight * signal_weight * (baseline_brier - realized_brier)
         karma_delta = (
             msg.recency_weight
-            * msg.signal_weight
+            * effective_signal_weight
             * (msg.baseline_brier - msg.realized_brier)
         )
 
@@ -184,22 +192,15 @@ class HiveMindOracleAdapter:
             1 + msg.pnl_volatility / benchmark_vol
         )
 
-        # Update operator karma
-        current_karma = self._operator_karma.get(msg.operator_id, 0.5)
+        # Update operator karma (seeded at 0.0 if not seen before)
+        current_karma = self._operator_karma.get(msg.operator_id, 0.0)
         new_karma = max(0.0, min(1.0, current_karma + karma_delta_risk_adj))
         self._operator_karma[msg.operator_id] = new_karma
 
-        # Update peak
+        # Update peak in _peak_karma only (no ledger mutation)
         self._peak_karma[msg.operator_id] = max(
             self._peak_karma.get(msg.operator_id, 0.0), new_karma
         )
-
-        # Update ledger if present
-        key = (msg.operator_id, msg.domain)
-        if key in self._ledger:
-            entry = self._ledger[key]
-            entry.karma = new_karma
-            entry.historical_peak_karma = max(entry.historical_peak_karma, new_karma)
 
         return {
             "karma_delta": karma_delta,
@@ -274,7 +275,7 @@ class HiveMindOracleAdapter:
 
         effective_weight = karma_decayed * haircut_mult * sample_mult
 
-        # Trust tier
+        # Trust tier — oracle_count from ledger's computed count
         peak_karma = self._peak_karma.get(operator_id, entry.karma)
         trust_tier = classify_tier(
             karma=karma_decayed,

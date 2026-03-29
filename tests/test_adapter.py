@@ -30,7 +30,6 @@ def make_snapshot(
     quality: float = 0.92,
     stake: float = 5000.0,
     ess: int = 180,
-    oracle_count: int = 3,
     oracle_id: str = "oracle-1",
     nonce: int = 1,
     timestamp: float | None = None,
@@ -45,12 +44,11 @@ def make_snapshot(
         domain=domain,
         timestamp=timestamp if timestamp is not None else time.time(),
         nonce=nonce,
-        karma_score=karma,
+        raw_karma=karma,
         confidence_interval=ConfidenceInterval(lower=ci_lower, upper=ci_upper),
         oracle_quality_score=quality,
         oracle_stake_pft=stake,
         effective_sample_size=ess,
-        oracle_count=oracle_count,
         oracle_state=state,
     )
 
@@ -89,8 +87,10 @@ def make_attribution(
 
 def test_oracle_verified_operator_gets_priority_routing():
     adapter = HiveMindOracleAdapter()
-    snap = make_snapshot(operator_id="op-t3", karma=0.85, ess=180, oracle_count=3)
-    adapter.ingest_snapshot(snap)
+    # Need 3 snapshots from different oracle IDs to get oracle_count >= 3
+    adapter.ingest_snapshot(make_snapshot(operator_id="op-t3", karma=0.85, ess=180, oracle_id="oracle-a", nonce=1))
+    adapter.ingest_snapshot(make_snapshot(operator_id="op-t3", karma=0.85, ess=180, oracle_id="oracle-b", nonce=1))
+    adapter.ingest_snapshot(make_snapshot(operator_id="op-t3", karma=0.85, ess=180, oracle_id="oracle-c", nonce=1))
 
     decision = adapter.compute_routing_decision("op-t3", "onchain")
     assert decision.trust_tier == TrustTier.T3
@@ -148,9 +148,14 @@ def test_karma_threshold_boundary_t1_to_t2():
 # ---------------------------------------------------------------------------
 
 def test_karma_threshold_boundary_t2_to_t3():
-    # Exactly 0.80 with sufficient samples and oracle_count=3
-    tier = classify_tier(karma=0.80, effective_sample_size=100, oracle_count=3)
-    assert tier == TrustTier.T3
+    adapter = HiveMindOracleAdapter()
+    # Ingest 3 snapshots from different oracle IDs to reach oracle_count >= 3
+    adapter.ingest_snapshot(make_snapshot(operator_id="op-t3b", karma=0.85, ess=100, oracle_id="oracle-x", nonce=1))
+    adapter.ingest_snapshot(make_snapshot(operator_id="op-t3b", karma=0.85, ess=100, oracle_id="oracle-y", nonce=1))
+    adapter.ingest_snapshot(make_snapshot(operator_id="op-t3b", karma=0.85, ess=100, oracle_id="oracle-z", nonce=1))
+
+    decision = adapter.compute_routing_decision("op-t3b", "onchain")
+    assert decision.trust_tier == TrustTier.T3
 
     # Exactly 0.80 but oracle_count < 3 — should fall to T2
     tier_not_t3 = classify_tier(karma=0.80, effective_sample_size=100, oracle_count=2)

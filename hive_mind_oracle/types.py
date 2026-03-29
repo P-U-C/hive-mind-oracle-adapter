@@ -43,13 +43,23 @@ class OracleScoreSnapshotV1:
     domain: str                  # e.g. "onchain", "social", "technical", "tradfi"
     timestamp: float             # unix epoch seconds
     nonce: int                   # monotonically increasing per oracle_id
-    karma_score: float           # raw [0, 1]
+    raw_karma: float             # raw [0, 1]
     confidence_interval: ConfidenceInterval
     oracle_quality_score: float  # [0, 1] — filter threshold 0.7
     oracle_stake_pft: float      # stake weight in PFT
     effective_sample_size: int
-    oracle_count: int
     oracle_state: OracleState = OracleState.unverified
+    # New required fields (with defaults for backwards compat)
+    event_id: str = field(default="")
+    occurred_at: str = field(default="")        # ISO 8601 string
+    idempotency_key: str = field(default="")
+    schema: str = field(default="ORACLE_SCORE_SNAPSHOT_V1")
+    signature: str = field(default="")          # secp256k1 stub
+    evidence_root: str = field(default="")
+    calibration_score: float = field(default=0.0)
+    freshness_seconds: int = field(default=0)
+    source_overlap_score: float = field(default=0.0)
+    sample_size: int = field(default=0)
 
 
 @dataclass
@@ -67,6 +77,17 @@ class AttributionOutcomeV1:
     signal_weight: float         # [0, 1]
     pnl_volatility: float        # realized vol of PnL
     benchmark_volatility: Optional[float] = None  # defaults to 0.02
+    # New required fields (with defaults for backwards compat)
+    event_id: str = field(default="")
+    occurred_at: str = field(default="")
+    schema: str = field(default="ATTRIBUTION_OUTCOME_V1")
+    nonce: int = field(default=0)
+    oracle_id: str = field(default="")
+    producer_id: str = field(default="")
+    conviction_id: str = field(default="")
+    horizon_hours: int = field(default=0)
+    scoring_method: str = field(default="brier")
+    signature: str = field(default="")
 
 
 @dataclass
@@ -119,9 +140,9 @@ class LedgerEntry:
     oracle_id: str
     karma: float
     effective_sample_size: int
-    oracle_count: int
-    timestamp: float          # when this entry was recorded
-    snapshot_timestamp: float # original snapshot timestamp
+    oracle_count: int             # computed: len(eligible_snaps) at ingestion time
+    timestamp: float              # when this entry was recorded
+    snapshot_timestamp: float     # original snapshot timestamp
     nonce: int
     high_divergence: bool = False
     confidence_haircut_applied: bool = False
