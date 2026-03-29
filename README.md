@@ -167,3 +167,66 @@ Edit `tiering.py` — `_raw_tier()` function. Thresholds and multipliers are def
 | `decay.py` | Domain-adaptive exponential decay + staleness haircut |
 | `aggregation.py` | CI-weighted multi-oracle consensus |
 | `mock_oracle.py` | Synthetic oracle events for tests |
+
+---
+
+## Production Deployment Notes
+
+### Persistence (Required for HA)
+
+The current `LedgerEntry` map is in-memory only. For production Hive Mind nodes, back it with Redis (already a runbook dependency) or PostgreSQL to survive restarts:
+
+```python
+# Redis backing (aioredis)
+redis_key = f"hive:ledger:{operator_id}:{domain}"
+await redis.setex(redis_key, ttl_seconds, json.dumps(entry_dict))
+
+# Or PostgreSQL — reuse the contributor_authorization table as the auth source,
+# and add a oracle_ledger table keyed by (operator_id, domain).
+```
+
+### Auth-Gate Integration
+
+This adapter is orthogonal to the Gate 4 enforcement tables (`contributor_authorization`, `reward_emissions`). The intended integration point:
+
+```
+T3 RoutingDecision → on_routing_decision callback → trigger linking-score review
+                   → auto-promote PROBATIONARY → AUTHORIZED (if karma ≥ 0.80 sustained 30d)
+```
+
+Expose the hook by passing an `on_routing_decision: Callable[[RoutingDecision], None] | None = None` to `HiveMindOracleAdapter.__init__()`.
+
+Tier → auth-gate state mapping:
+| Trust Tier | Auth-Gate State | Notes |
+|-----------|----------------|-------|
+| T0 | UNKNOWN / PROBATIONARY | No oracle endorsement |
+| T1 | PROBATIONARY | 25% liquid / 75% vesting |
+| T2 | AUTHORIZED | 100% liquid |
+| T3 | TRUSTED (Layer B) | Reduced gate checks + 2.0× routing |
+
+### Policy Versioning
+
+`RoutingDecision` exposes routing_notes but not `policy_version`. For audit-log compliance, add:
+
+```python
+@dataclass
+class RoutingDecision:
+    ...
+    policy_version: str = "spi.oracle.v1"
+```
+
+### Cryptographic Signatures
+
+The `_verify_signature` stub uses secp256k1 (consistent with PFTL wallet binding). Production path:
+1. Register oracle public key in Oracle Registry at deployment
+2. On each snapshot: SHA-256 canonical payload → verify secp256k1 sig
+3. On failure: reject message, slash oracle bond per runbook Section 0.3
+
+BLS aggregate signatures are a future upgrade — allows batch-verifying N oracle snapshots in a single pairing check. Relevant once N > 10 oracles are live.
+
+### Deployment Model
+
+Deploy as a sidecar to every Hive Mind / TaskNode instance. Shadow → soft → full rollout mirrors the auth-gate phased deployment. Monitor `routing_notes` for spikes in:
+- `"Low sample multiplier"` → early Sybil signal
+- `"Staleness haircut"` → oracle degradation
+- `"High oracle divergence"` → potential oracle collusion attempt
