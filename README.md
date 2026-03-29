@@ -22,23 +22,36 @@ python -m pytest tests/ -v
 ## Example: Routing a T3 Operator
 
 ```python
-from hive_mind_oracle import HiveMindOracleAdapter, MockOracleClient
+import time
+from hive_mind_oracle import HiveMindOracleAdapter
+from hive_mind_oracle.types import OracleScoreSnapshotV1, ConfidenceInterval, OracleState
 
 adapter = HiveMindOracleAdapter()
-mock = MockOracleClient()
 
-# Ingest a high-karma oracle snapshot
-snap = mock.emit_high_karma_producer("alpha-trader-001", "onchain")
-adapter.ingest_snapshot(snap)
+# T3 requires ≥3 distinct oracle IDs, karma ≥0.80, effective_sample_size ≥100
+for oracle_id, karma in [("oracle-a", 0.85), ("oracle-b", 0.83), ("oracle-c", 0.86)]:
+    snap = OracleScoreSnapshotV1(
+        schema_version="spi.oracle.v1",
+        oracle_id=oracle_id,
+        operator_id="alpha-trader-001",
+        domain="onchain",
+        timestamp=time.time(),
+        nonce=1,
+        raw_karma=karma,
+        confidence_interval=ConfidenceInterval(lower=0.80, upper=0.90),
+        oracle_quality_score=0.92,
+        oracle_stake_pft=5000.0,
+        effective_sample_size=180,
+        oracle_state=OracleState.verified,
+    )
+    adapter.handle_reputation_update(snap)
 
-# Compute routing decision
 decision = adapter.compute_routing_decision("alpha-trader-001", "onchain")
 
 print(f"Trust Tier:        {decision.trust_tier.value}")
 print(f"Tier Multiplier:   {decision.tier_multiplier}×")
 print(f"Effective Weight:  {decision.effective_weight:.4f}")
 print(f"Oracle Karma:      {decision.oracle_karma:.4f}")
-print(f"Notes:             {decision.routing_notes}")
 ```
 
 **Output:**
@@ -47,9 +60,9 @@ Trust Tier:        T3
 Tier Multiplier:   2.0×
 Effective Weight:  1.7000
 Oracle Karma:      0.8500
-Notes:             ['Decay applied: karma 0.8500 → 0.8500 (age=0.000d, domain=onchain)',
-                    'Trust tier: T3 (multiplier=2.0)']
 ```
+
+> **Note:** T3 requires snapshots from at least 3 distinct `oracle_id` values. A single oracle sending multiple snapshots cannot satisfy the multi-oracle threshold — each oracle overwrites its own previous entry in the pool.
 
 ---
 
@@ -103,7 +116,7 @@ compute_routing_decision(operator, domain)
   "domain": "onchain",
   "timestamp": 1711700000.0,
   "nonce": 42,
-  "karma_score": 0.85,
+  "raw_karma": 0.85,
   "confidence_interval": {"lower": 0.80, "upper": 0.90},
   "oracle_quality_score": 0.92,
   "oracle_stake_pft": 5000.0,

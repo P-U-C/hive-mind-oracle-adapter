@@ -360,22 +360,3 @@ class HiveMindOracleAdapter:
         """
         return self.ingest_attribution_outcome(msg)
 
-    # ------------------------------------------------------------------
-    # Task-spec aliases — explicit names matching verification requirements
-    # ------------------------------------------------------------------
-
-    def handle_reputation_update(self, msg: OracleScoreSnapshotV1) -> LedgerEntry:
-        """
-        Alias for ingest_snapshot().
-        Matches the 'reputation_update' handler required by the
-        Hive Mind Oracle Routing spec verification criteria.
-        """
-        return self.ingest_snapshot(msg)
-
-    def handle_attribution_outcome(self, msg: AttributionOutcomeV1) -> dict:
-        """
-        Alias for ingest_attribution_outcome().
-        Matches the 'attribution_outcome' handler required by the
-        Hive Mind Oracle Routing spec verification criteria.
-        """
-        return self.ingest_attribution_outcome(msg)
