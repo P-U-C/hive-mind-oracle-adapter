@@ -1,0 +1,169 @@
+# Hive Mind Oracle Routing Adapter
+
+A Python implementation of the **SPI Oracle v1** routing adapter — translates multi-oracle reputation evidence into trust-tiered routing decisions for the Hive Mind network.
+
+---
+
+## Setup
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install pytest
+```
+
+## Run Tests
+
+```bash
+python -m pytest tests/ -v
+```
+
+---
+
+## Example: Routing a T3 Operator
+
+```python
+from hive_mind_oracle import HiveMindOracleAdapter, MockOracleClient
+
+adapter = HiveMindOracleAdapter()
+mock = MockOracleClient()
+
+# Ingest a high-karma oracle snapshot
+snap = mock.emit_high_karma_producer("alpha-trader-001", "onchain")
+adapter.ingest_snapshot(snap)
+
+# Compute routing decision
+decision = adapter.compute_routing_decision("alpha-trader-001", "onchain")
+
+print(f"Trust Tier:        {decision.trust_tier.value}")
+print(f"Tier Multiplier:   {decision.tier_multiplier}×")
+print(f"Effective Weight:  {decision.effective_weight:.4f}")
+print(f"Oracle Karma:      {decision.oracle_karma:.4f}")
+print(f"Notes:             {decision.routing_notes}")
+```
+
+**Output:**
+```
+Trust Tier:        T3
+Tier Multiplier:   2.0×
+Effective Weight:  1.7000
+Oracle Karma:      0.8500
+Notes:             ['Decay applied: karma 0.8500 → 0.8500 (age=0.000d, domain=onchain)',
+                    'Trust tier: T3 (multiplier=2.0)']
+```
+
+---
+
+## Architecture
+
+```
+Oracle Nodes
+    │
+    │  OracleScoreSnapshotV1 (spi.oracle.v1)
+    ▼
+HiveMindOracleAdapter.ingest_snapshot()
+    │
+    ├── Validate: schema_version, nonce monotonicity, timestamp freshness (±60s)
+    ├── Aggregate: CI-weighted multi-oracle consensus
+    │       w_i = (stake × quality) / (ci_width² + 0.01)
+    │       weighted median → consensus_karma
+    │       <3 eligible oracles → 50% confidence haircut
+    └── Store: LedgerEntry (operator, domain, karma, peak, samples)
+    
+AttributionOutcomeV1 (trade resolves)
+    │
+    ├── Idempotency dedup by key
+    ├── karma_delta = recency × signal × (baseline_brier − realized_brier)
+    └── Risk-adjusted: delta / (1 + pnl_vol / benchmark_vol)
+
+compute_routing_decision(operator, domain)
+    │
+    ├── Exponential decay: karma_eff = karma × exp(−ln2 × age_days / half_life)
+    │       Domain half-lives (days): social/narrative=7, onchain=14,
+    │                                 technical=21, default=30, tradfi/macro=60
+    ├── Staleness haircut if age > 3600s: haircut = min(ratio×0.25, 0.75)
+    ├── Low-sample penalty if n < 20: 0.5× weight
+    ├── Trust tier classification:
+    │       T0: karma < 0.40
+    │       T1: karma 0.40–0.59, n ≥ 20  (multiplier 1.2×)
+    │       T2: karma 0.60–0.79, n ≥ 50  (multiplier 1.5×)
+    │       T3: karma ≥ 0.80, n ≥ 100, oracles ≥ 3  (multiplier 2.0×)
+    └── Returns RoutingDecision
+```
+
+---
+
+## Wire Format Examples
+
+**OracleScoreSnapshotV1:**
+```json
+{
+  "schema_version": "spi.oracle.v1",
+  "oracle_id": "oracle-alpha-001",
+  "operator_id": "alpha-trader-001",
+  "domain": "onchain",
+  "timestamp": 1711700000.0,
+  "nonce": 42,
+  "karma_score": 0.85,
+  "confidence_interval": {"lower": 0.80, "upper": 0.90},
+  "oracle_quality_score": 0.92,
+  "oracle_stake_pft": 5000.0,
+  "effective_sample_size": 180,
+  "oracle_count": 3,
+  "oracle_state": "verified"
+}
+```
+
+**AttributionOutcomeV1:**
+```json
+{
+  "schema_version": "spi.oracle.v1",
+  "idempotency_key": "trade-007-alpha-trader-001",
+  "operator_id": "alpha-trader-001",
+  "domain": "onchain",
+  "trade_id": "trade-007",
+  "timestamp": 1711700100.0,
+  "baseline_brier": 0.25,
+  "realized_brier": 0.10,
+  "recency_weight": 0.9,
+  "signal_weight": 0.8,
+  "pnl_volatility": 0.015,
+  "benchmark_volatility": 0.02
+}
+```
+
+See [Post Fiat SPI Oracle spec](https://postfiat.org/specs/spi-oracle) for full wire format documentation.
+
+---
+
+## How to Extend
+
+### Adding a New Oracle
+
+1. Create a snapshot emitter in `mock_oracle.py` (for testing) or implement a real oracle client.
+2. Call `adapter.ingest_snapshot(snapshot)` with a valid `OracleScoreSnapshotV1`.
+3. The adapter auto-aggregates all snapshots for the same `(operator_id, domain)` pair.
+
+### Adding a New Domain
+
+1. Add the domain name and half-life to `DOMAIN_HALF_LIVES` in `decay.py`:
+   ```python
+   DOMAIN_HALF_LIVES["defi"] = 10.0  # 10-day half-life for DeFi signals
+   ```
+2. The rest of the pipeline (aggregation, tiering, routing) picks it up automatically.
+
+### Adjusting Trust Tier Thresholds
+
+Edit `tiering.py` — `_raw_tier()` function. Thresholds and multipliers are defined at the top of the module.
+
+---
+
+## Module Reference
+
+| Module | Purpose |
+|--------|---------|
+| `types.py` | Dataclasses for all wire messages and internal state |
+| `adapter.py` | Main adapter: ingest, aggregate, route |
+| `tiering.py` | Trust tier classification (T0–T3) |
+| `decay.py` | Domain-adaptive exponential decay + staleness haircut |
+| `aggregation.py` | CI-weighted multi-oracle consensus |
+| `mock_oracle.py` | Synthetic oracle events for tests |
