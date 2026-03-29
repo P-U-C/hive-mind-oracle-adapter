@@ -230,3 +230,19 @@ Deploy as a sidecar to every Hive Mind / TaskNode instance. Shadow → soft → 
 - `"Low sample multiplier"` → early Sybil signal
 - `"Staleness haircut"` → oracle degradation
 - `"High oracle divergence"` → potential oracle collusion attempt
+
+---
+
+## Known Limitations & Future Work
+
+### Distributed Safety
+State (nonces, snapshots, peak karma) is in-memory only. A restart resets trust history and replay protection. In a multi-worker deployment, instances can diverge. **Mitigation:** Back `LedgerEntry` with Redis (keyed `hive:ledger:{operator_id}:{domain}`) and store `processed_idempotency_keys` in a shared Redis set with TTL.
+
+### Signature Verification  
+The `_verify_signature` stub always accepts. Real deployment requires secp256k1 key lookup from Oracle Registry + canonical payload hashing before any snapshot is trusted. See `adapter.py` stub for production requirements.
+
+### Correlated Oracle Discounting
+Three oracles with high `source_overlap_score` are not yet discounted in proportion to their correlation. Independent evidence carries more epistemic weight than correlated evidence. Future: apply `source_overlap_score` as a dependency discount factor: `effective_weight = w * (1 - source_overlap_score)`.
+
+### Divergence Pricing
+`high_divergence` flag is logged in `routing_notes` but does not automatically reduce `effective_weight` beyond the 50% confidence haircut. Future: when `high_divergence=True`, cap `trust_tier` at T2 maximum until a third independent oracle resolves.

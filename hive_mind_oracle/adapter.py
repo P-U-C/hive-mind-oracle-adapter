@@ -40,7 +40,7 @@ class HiveMindOracleAdapter:
     def __init__(self, time_offset: float = 0.0) -> None:
         self._time_offset = time_offset
         self._ledger: dict[tuple[str, str], LedgerEntry] = {}
-        self._snapshots: dict[tuple[str, str], list[OracleScoreSnapshotV1]] = {}
+        self._snapshots: dict[tuple[str, str], dict[str, OracleScoreSnapshotV1]] = {}
         self._nonces: dict[str, int] = {}
         self._processed_keys: set[str] = set()
         self._operator_karma: dict[str, float] = {}
@@ -94,6 +94,24 @@ class HiveMindOracleAdapter:
             )
         # Signature verification stub
         self._verify_signature("ORACLE_SCORE_SNAPSHOT_V1", {}, msg.signature, msg.oracle_id)
+        # Field range validation
+        self._validate_fields(msg)
+
+    def _validate_fields(self, msg: OracleScoreSnapshotV1) -> None:
+        """Validate numeric field ranges to prevent adversarial manipulation."""
+        if not (0.0 <= msg.raw_karma <= 1.0):
+            raise ValueError(f"raw_karma out of range [0,1]: {msg.raw_karma}")
+        if not (0.0 <= msg.oracle_quality_score <= 1.0):
+            raise ValueError(f"oracle_quality_score out of range [0,1]: {msg.oracle_quality_score}")
+        if msg.oracle_stake_pft < 0:
+            raise ValueError(f"oracle_stake_pft cannot be negative: {msg.oracle_stake_pft}")
+        if msg.effective_sample_size < 0:
+            raise ValueError(f"effective_sample_size cannot be negative: {msg.effective_sample_size}")
+        ci = msg.confidence_interval
+        if not (0.0 <= ci.lower <= ci.upper <= 1.0):
+            raise ValueError(f"confidence_interval invalid: [{ci.lower}, {ci.upper}]")
+        if ci.lower == ci.upper:
+            raise ValueError(f"confidence_interval has zero width — pathological input: {ci.lower}")
 
     # ------------------------------------------------------------------
     # Public API
@@ -112,18 +130,22 @@ class HiveMindOracleAdapter:
 
         key = (msg.operator_id, msg.domain)
 
-        # Store snapshot for aggregation
+        # Store snapshot for aggregation — deduplicate by oracle_id, keep latest per oracle
         if key not in self._snapshots:
-            self._snapshots[key] = []
-        self._snapshots[key].append(msg)
+            self._snapshots[key] = {}  # dict keyed by oracle_id
+        self._snapshots[key][msg.oracle_id] = msg  # overwrites previous snapshot from same oracle
 
         # Aggregate all snapshots for this (operator, domain)
         consensus_karma, high_divergence = aggregate_oracle_snapshots(
-            self._snapshots[key]
+            list(self._snapshots[key].values())
         )
 
-        eligible_snaps = [s for s in self._snapshots[key] if s.oracle_quality_score >= 0.7]
+        eligible_snaps = [s for s in self._snapshots[key].values() if s.oracle_quality_score >= 0.7]
         haircut_applied = len(eligible_snaps) < 3
+
+        all_snapshot_timestamps = [s.timestamp for s in self._snapshots[key].values()]
+        oldest_snapshot_timestamp = min(all_snapshot_timestamps)
+        snapshot_timestamp = max(all_snapshot_timestamps)
 
         now = self._now()
         entry = LedgerEntry(
@@ -134,7 +156,8 @@ class HiveMindOracleAdapter:
             effective_sample_size=msg.effective_sample_size,
             oracle_count=len(eligible_snaps),
             timestamp=now,
-            snapshot_timestamp=msg.timestamp,
+            snapshot_timestamp=snapshot_timestamp,
+            oldest_snapshot_timestamp=oldest_snapshot_timestamp,
             nonce=msg.nonce,
             high_divergence=high_divergence,
             confidence_haircut_applied=haircut_applied,
@@ -175,6 +198,16 @@ class HiveMindOracleAdapter:
         if msg.idempotency_key in self._processed_keys:
             return {"status": "already_processed"}
 
+        if not (0.0 <= msg.signal_weight <= 1.0):
+            raise ValueError(f"signal_weight out of range [0,1]: {msg.signal_weight}")
+        if not (0.0 <= msg.recency_weight <= 1.0):
+            raise ValueError(f"recency_weight out of range [0,1]: {msg.recency_weight}")
+        if msg.pnl_volatility < 0:
+            raise ValueError(f"pnl_volatility cannot be negative: {msg.pnl_volatility}")
+        benchmark_vol = msg.benchmark_volatility or DEFAULT_BENCHMARK_VOLATILITY
+        if benchmark_vol <= 0:
+            raise ValueError(f"benchmark_volatility must be positive: {benchmark_vol}")
+
         self._processed_keys.add(msg.idempotency_key)
 
         # Enforce spec: signal_weight = 0 if confidence < 0.30
@@ -187,7 +220,6 @@ class HiveMindOracleAdapter:
             * (msg.baseline_brier - msg.realized_brier)
         )
 
-        benchmark_vol = msg.benchmark_volatility or DEFAULT_BENCHMARK_VOLATILITY
         karma_delta_risk_adj = karma_delta / (
             1 + msg.pnl_volatility / benchmark_vol
         )
@@ -245,8 +277,9 @@ class HiveMindOracleAdapter:
         entry = self._ledger[key]
         now = self._now()
 
-        # Age in days for decay
-        age_seconds = now - entry.snapshot_timestamp
+        # Age in days for decay — use oldest snapshot to prevent fresh oracle masking stale consensus
+        staleness_base = entry.oldest_snapshot_timestamp if entry.oldest_snapshot_timestamp > 0 else entry.snapshot_timestamp
+        age_seconds = now - staleness_base
         age_days = age_seconds / 86400.0
 
         # Apply exponential decay
@@ -306,3 +339,23 @@ class HiveMindOracleAdapter:
             oracle_state=oracle_state,
             routing_notes=notes,
         )
+
+    # ------------------------------------------------------------------
+    # Task-spec aliases (explicit names matching verification requirements)
+    # ------------------------------------------------------------------
+
+    def handle_reputation_update(self, msg: OracleScoreSnapshotV1) -> LedgerEntry:
+        """
+        Alias for ingest_snapshot().
+        Matches the 'reputation_update' message type handler required by the
+        Hive Mind Oracle Routing spec verification criteria.
+        """
+        return self.ingest_snapshot(msg)
+
+    def handle_attribution_outcome(self, msg: AttributionOutcomeV1) -> dict:
+        """
+        Alias for ingest_attribution_outcome().
+        Matches the 'attribution_outcome' message type handler required by the
+        Hive Mind Oracle Routing spec verification criteria.
+        """
+        return self.ingest_attribution_outcome(msg)

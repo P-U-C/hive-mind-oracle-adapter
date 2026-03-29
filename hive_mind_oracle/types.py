@@ -147,3 +147,4 @@ class LedgerEntry:
     high_divergence: bool = False
     confidence_haircut_applied: bool = False
     historical_peak_karma: float = 0.0
+    oldest_snapshot_timestamp: float = 0.0  # timestamp of oldest contributing oracle snapshot
